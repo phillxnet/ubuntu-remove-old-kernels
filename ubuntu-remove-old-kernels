@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# Usage
+# pass y as an argument so it can be run interactively or via a contab
+# ie interactively we can be asked if we want to execute the proposed command
+# or just pass y when invocing for use in crontab / other scripts
+
+ARGUMENT=$1
+
+if [ "$ARGUMENT" != "test" ] && [ "$ARGUMENT" != "MIS" ]; then
+  echo
+  echo "To use this script please pass on the command line either:-"
+  echo "test - which will show what the script intends to purge; but it will do nothing else"
+  echo "or"
+  echo "MIS - (Make It So) where it will execute (as root via sudo) the purge command indicated by test"
+  echo "N.B. the mis argument is dangerous if you do not trust this script or its logic"
+  echo
+  exit -1
+fi
+
+# Thanks to Mark at http://askubuntu.com/questions/2793/how-do-i-remove-or-hide-old-kernel-versions-to-clean-up-the-boot-menu
+
+# This script assumes that the installed linux-image and linux-headers packages
+# share the same versions (i.e. if a linux-image version number is installed,
+# the corresponding linux-headers package will also be installed, and vice
+# versa.)
+
+# I (Philip / phillxnet) have come accross a system that was installing newer kernels but due to a failed distribution upgrade was stuck on
+# an old kernel, the script this one is almost entirely based on would happily remove the running kernel
+# So we need to exclude the removal of the running kernel, ie exit if that is asked for.
+
+# in the instance of installing a kernel we haven't reboot into yet then the list method should still list it.
+
+# from original source by David Kemp we have a sed exit when it find the uname kernel rather than the SECONDTOLASTVER
+# need to modify to do either.
+# his variant quits if uname match else prints
+# sed -n '/'`uname -r`'/q;p' 
+
+# a breakdown of Mark's original SECONDTOLASTVER line in above link.
+# dpkg --list | grep linux-image | awk '{ print $2 }'
+# filter for the package version (second column) of all packages with "linux-image" in their names
+# eg linux-image-generic, linux-image-3.13.0-37-generic, linux-image-3.13.0-39-generic, linux-image-extra-3.13.0-37-generic, linux-image-extra-3.13.0-39-generic
+# pass this to a reverse numbric order sort (newest to oldest) sort -r -n
+# pass the above through a filter that deletes lines that have no numbers in ie remove the meta package linux-image-generic which simply depends on the latest kernel
+# pass the above through a filter that keeps only numbers full stops and dashes except the last dash
+# N.B. don't get this sed fully so would like a simpler variation.  Maybe just replace all non (numbers letters dashes) then clip first and last dash
+# May not even have to bother with that much filtering as all we need a string match later on so could even leave the dashes as will match the dpkg output still.
+# filter only lines that are not duplicates of those that have come before (except it doesn't work here as uniq will only strip duplicate lines that are immediately after each other.
+# finally sed -n (quiet) ie turns off printing unless requested, here we request the second line.
+# hence the second newest kernel version.
+
+# SECONDTOLASTVER=$(dpkg --list | grep linux-image | awk '{ print $2 }' | sort -r -n | sed '/^[^0-9]\+$/d' | sed 's/^.*-\([0-9\.]\+-[0-9]\+\).*/\1/' | uniq | sed -n 2p)
+
+# I have moved the sort to later on when there are only numbers then uniq, which will only remove adjacent duplicates, can do it's thing.
+
+echo
+echo "Running old kernel removal script"
+SECONDTOLASTVER=$(dpkg --list | grep linux-image | awk '{ print $2 }' | sed '/^[^0-9]\+$/d' | sed 's/^.*-\([0-9\.]\+-[0-9]\+\).*/\1/' | sort -r -n | uniq | sed -n 2p)
+echo
+echo "Penultimate version of kernel package version installed is:-"
+echo $SECONDTOLASTVER
+
+# To add protection against removing the running kernel we need to know what it's version is.
+# We can't assume that it is the newest version as I have seen otherwise, ie after partially failed distribution upgrades
+# Once I saw a system whose kernel was from the previous Ubuntu version but all newer kernels had been installed but not activated
+# take uname -r which gives eg "3.13.0-40-generic"
+# then strip out -generic
+
+RUNNINGVER=$(uname -r | sed 's/-generic//g')
+echo "Currently running kernel package version installed is:-"
+echo $RUNNINGVER
+
+# get a list of package names containing the argument passed to the function
+# ie either linux-image, or linux-headers
+# return only those package names which should be removed;
+# ie are not the second to last (Penultimate) kernel.
+# done by quiting q if a match to the second to last kernel is found
+get_pkgs_to_remove_matching () {
+    # if $SECONDTOLASTVER is a non zero string (ie there is a second to last kernel)
+    if [ -n "$SECONDTOLASTVER" ]; then
+        # echo $(dpkg --list | grep $1 | awk '{ print $2 }' | sort | sed -n '/'"$SECONDTOLASTVER"'/q;p')
+        # Remove the linux-image-generic / linux-headers-generic from that generated list as in the above SECONDTOLASTVER line
+        PROPOSEDFORREMOVAL=$(dpkg --list | grep $1 | awk '{ print $2 }' | sed '/^[^0-9]\+$/d' | sort | sed -n '/'"$SECONDTOLASTVER"'/q;p')
+        # Pass the list of all kernel versions installed bar the Penultimate and newest to sed so it can remove 
+        # any lines containing the running kernel version just in case it was accidentally included.
+        # as an additional safety we can retain a specific hardwired version of the kernel by adding and additional sed
+        # eg | sed '/'"3.13.0-40"'/d' to the end of the following line inside the last bracket
+        echo $(echo "$PROPOSEDFORREMOVAL" | sed '/'"$RUNNINGVER"'/d')
+    fi
+}
+
+echo "package versions starting with linux-image for removal:-"
+echo $(get_pkgs_to_remove_matching linux-image)
+
+echo "package versions starting with linux-headers for removal:-"
+echo $(get_pkgs_to_remove_matching linux-headers)
+
+# removed the -y on apt-get near the end for testing perposes.
+if [ "$ARGUMENT" == "test" ]; then
+  echo "The following command line is suggested"
+  echo "sudo apt-get purge $(get_pkgs_to_remove_matching linux-image) $(get_pkgs_to_remove_matching linux-headers)"
+  echo
+  echo "a trial (will auto Abort) run of which is:-"
+  echo
+  echo $(get_pkgs_to_remove_matching linux-image) $(get_pkgs_to_remove_matching linux-headers) | xargs sudo apt-get purge
+  echo
+fi
+
+# the dangerous bit
+if [ "$ARGUMENT" == "MIS" ]; then
+  echo "About to run the following command as root using sudo"
+  echo "sudo apt-get purge $(get_pkgs_to_remove_matching linux-image) $(get_pkgs_to_remove_matching linux-headers)"
+  echo $(get_pkgs_to_remove_matching linux-image) $(get_pkgs_to_remove_matching linux-headers) | xargs sudo apt-get -y purge
+  echo
+fi
+
+# would like to make this cronable as well as interactive if need be ie via switch
+# >/dev/null 2>&1 on end of crontab line (send standard error (2) to standard out (&1)
+# logger -f /path/to/a/file will log that file to syslog
+# logger -s "message" goes to standard eror (screen) and to system logger
+# logger -t oldkernelremoval
+# the following would send all error and standard out to logger (/var/log/syslog) and tag it with KERNEL-PURGE
+# /usr/local/bin/ubuntu-remove-old-kernels MIS 2>&1 >> /usr/bin/logger -t KERNEL-PURGE
